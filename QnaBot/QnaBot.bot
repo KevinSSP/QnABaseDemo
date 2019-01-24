@@ -5,9 +5,17 @@
       "type": "endpoint",
       "name": "development",
       "endpoint": "http://localhost:3978/api/messages",
-      "appId": "",
-      "appPassword": "",
+      "appId": "077fccb3-a910-42ca-bd6a-98f42d29457c",
+      "appPassword": "5sjqP:)&[tO0um}G",
       "id": "1"
+    },
+    {
+      "type": "qna",
+      "name": "KBQna",
+      "kbId": "c1d9e260-0058-40e1-a2dd-8b50181b5f9a",
+      "endpointKey": "f951c41a-1f22-4d15-87a6-190250a41c2b",
+      "hostname": "https://qnageneral.azurewebsites.net/qnamaker",
+      "id": "2"
     }
   ],
   "padlock": "",

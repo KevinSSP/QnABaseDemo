@@ -11,7 +11,7 @@
       "type": "endpoint",
       "id": "2",
       "name": "production",
-      "url": "https://your-bot-url.azurewebsites.net/api/messages"
+      "url": "https://efectbot.azurewebsites.net/api/messages"
     },
     {
       "type": "abs",

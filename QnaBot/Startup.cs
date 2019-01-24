@@ -6,6 +6,7 @@ using System.Linq;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Bot.Builder;
+using Microsoft.Bot.Builder.AI.QnA;
 using Microsoft.Bot.Builder.Integration;
 using Microsoft.Bot.Builder.Integration.AspNet.Core;
 using Microsoft.Bot.Configuration;
@@ -54,89 +55,46 @@ namespace QnaBot
         /// <seealso cref="https://docs.microsoft.com/en-us/azure/bot-service/bot-service-manage-channels?view=azure-bot-service-4.0"/>
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddBot<QnaBotBot>(options =>
-           {
-               var secretKey = Configuration.GetSection("botFileSecret")?.Value;
-               var botFilePath = Configuration.GetSection("botFilePath")?.Value;
+            var secretKey = Configuration.GetSection("botFileSecret")?.Value;
+            var botFilePath = Configuration.GetSection("botFilePath")?.Value;
 
-                // Loads .bot configuration file and adds a singleton that your Bot can access through dependency injection.
-                var botConfig = BotConfiguration.Load(botFilePath ?? @".\QnaBot.bot", secretKey);
-               services.AddSingleton(sp => botConfig ?? throw new InvalidOperationException($"The .bot config file could not be loaded. ({botConfig})"));
+            // Loads .bot configuration file and adds a singleton that your Bot can access through dependency injection.
+            var botConfig = BotConfiguration.Load(botFilePath ?? @".\BotConfiguration.bot", secretKey);
+            services.AddSingleton(sp => botConfig ?? throw new InvalidOperationException($"No se pudo cargar el archivo de configuración .bot . ({botConfig})"));
 
-                // Retrieve current endpoint.
-                var environment = _isProduction ? "production" : "development";
-               var service = botConfig.Services.FirstOrDefault(s => s.Type == "endpoint" && s.Name == environment);
-               if (!(service is EndpointService endpointService))
-               {
-                   throw new InvalidOperationException($"The .bot file does not contain an endpoint with name '{environment}'.");
-               }
+            // Retrieve current endpoint.
+            var environment = _isProduction ? "production" : "development";
 
-               options.CredentialProvider = new SimpleCredentialProvider(endpointService.AppId, endpointService.AppPassword);
+            ICredentialProvider credentialProvider = null;
 
-                // Creates a logger for the application to use.
-                ILogger logger = _loggerFactory.CreateLogger<QnaBotBot>();
+            foreach (var service in botConfig.Services)
+            {
+                switch (service.Type)
+                {
+                    case ServiceTypes.Endpoint:
+                        if (service is EndpointService endpointService)
+                        {
+                            credentialProvider = new SimpleCredentialProvider(endpointService.AppId, endpointService.AppPassword);
+                        }
 
-                // Catches any errors that occur during a conversation turn and logs them.
-                options.OnTurnError = async (context, exception) =>
-               {
-                   logger.LogError($"Exception caught : {exception}");
-                   await context.SendActivityAsync("Sorry, it looks like something went wrong.");
-               };
+                        break;
+                    case ServiceTypes.QnA:
+                        if (service is QnAMakerService qnaMakerService)
+                        {
+                            var qnaEndpoint = new QnAMakerEndpoint
+                            {
+                                Host = qnaMakerService.Hostname,
+                                EndpointKey = qnaMakerService.EndpointKey,
+                                KnowledgeBaseId = qnaMakerService.KbId,
+                            };
+                            services.AddSingleton(new QnAMaker(qnaEndpoint));
+                        }
 
-                // The Memory Storage used here is for local bot debugging only. When the bot
-                // is restarted, everything stored in memory will be gone.
-                IStorage dataStore = new MemoryStorage();
+                        break;
+                }
+            }
 
-                // For production bots use the Azure Blob or
-                // Azure CosmosDB storage providers. For the Azure
-                // based storage providers, add the Microsoft.Bot.Builder.Azure
-                // Nuget package to your solution. That package is found at:
-                // https://www.nuget.org/packages/Microsoft.Bot.Builder.Azure/
-                // Uncomment the following lines to use Azure Blob Storage
-                // //Storage configuration name or ID from the .bot file.
-                // const string StorageConfigurationId = "<STORAGE-NAME-OR-ID-FROM-BOT-FILE>";
-                // var blobConfig = botConfig.FindServiceByNameOrId(StorageConfigurationId);
-                // if (!(blobConfig is BlobStorageService blobStorageConfig))
-                // {
-                //    throw new InvalidOperationException($"The .bot file does not contain an blob storage with name '{StorageConfigurationId}'.");
-                // }
-                // // Default container name.
-                // const string DefaultBotContainer = "<DEFAULT-CONTAINER>";
-                // var storageContainer = string.IsNullOrWhiteSpace(blobStorageConfig.Container) ? DefaultBotContainer : blobStorageConfig.Container;
-                // IStorage dataStore = new Microsoft.Bot.Builder.Azure.AzureBlobStorage(blobStorageConfig.ConnectionString, storageContainer);
-
-                // Create Conversation State object.
-                // The Conversation State object is where we persist anything at the conversation-scope.
-                var conversationState = new ConversationState(dataStore);
-
-               options.State.Add(conversationState);
-           });
-
-            // Create and register state accessors.
-            // Accessors created here are passed into the IBot-derived class on every turn.
-            services.AddSingleton<QnaBotAccessors>(sp =>
-           {
-               var options = sp.GetRequiredService<IOptions<BotFrameworkOptions>>().Value;
-               if (options == null)
-               {
-                   throw new InvalidOperationException("BotFrameworkOptions must be configured prior to setting up the state accessors");
-               }
-
-               var conversationState = options.State.OfType<ConversationState>().FirstOrDefault();
-               if (conversationState == null)
-               {
-                   throw new InvalidOperationException("ConversationState must be defined and added before adding conversation-scoped state accessors.");
-               }
-
-                // Create the custom state accessor.
-                // State accessors enable other components to read and write individual properties of state.
-                var accessors = new QnaBotAccessors(conversationState)
-               {
-                   CounterState = conversationState.CreateProperty<CounterState>(QnaBotAccessors.CounterStateName),
-               };
-
-               return accessors;
-           });
+            services.AddBot<QnaBotBot>(options => ConfigureBot(options, credentialProvider));
         }
 
         public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
@@ -146,6 +104,33 @@ namespace QnaBot
             app.UseDefaultFiles()
                 .UseStaticFiles()
                 .UseBotFramework();
+        }
+
+        private void ConfigureBot(BotFrameworkOptions options, ICredentialProvider credentialProvider)
+        {
+            // Set the CredentialProvider for the bot. It uses this to authenticate with the QnA service in Azure
+            options.CredentialProvider = credentialProvider
+                                         ?? throw new InvalidOperationException("Falta información en el endpoint del archivo de configuración de arranque.");
+
+            // Creates a logger for the application to use.
+            ILogger logger = _loggerFactory.CreateLogger<QnaBotBot>();
+
+            // Catches any errors that occur during a conversation turn and logs them.
+            options.OnTurnError = async (context, exception) =>
+            {
+                logger.LogError($"Excepción atrapada : {exception}");
+                await context.SendActivityAsync("Lo siento, parece que algo salió mal.");
+            };
+
+            // The Memory Storage used here is for local bot debugging only. When the bot
+            // is restarted, everything stored in memory will be gone.
+            IStorage dataStore = new MemoryStorage();
+
+            // Create Conversation State object.
+            // The Conversation State object is where we persist anything at the conversation-scope.
+            var conversationState = new ConversationState(dataStore);
+
+            options.State.Add(conversationState);
         }
     }
 }

@@ -1,11 +1,17 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Bot.Builder;
+using Microsoft.Bot.Builder.AI.QnA;
 using Microsoft.Bot.Schema;
 using Microsoft.Extensions.Logging;
+// LUIS Tutorial - add dependencies
+using Microsoft.ApplicationInsights;
 
 namespace QnaBot
 {
@@ -22,16 +28,17 @@ namespace QnaBot
     /// <seealso cref="https://docs.microsoft.com/en-us/aspnet/core/fundamentals/dependency-injection?view=aspnetcore-2.1"/>
     public class QnaBotBot : IBot
     {
-        private readonly QnaBotAccessors _accessors;
+        //private readonly QnaBotAccessors _accessors;
+        private readonly QnAMaker _qnaMaker;
         private readonly ILogger _logger;
 
         /// <summary>
         /// Initializes a new instance of the class.
         /// </summary>
-        /// <param name="accessors">A class containing <see cref="IStatePropertyAccessor{T}"/> used to manage state.</param>
+        /// /// <param name="qnaMaker">The service to connect to th QnA Azure service</param>
         /// <param name="loggerFactory">A <see cref="ILoggerFactory"/> that is hooked to the Azure App Service provider.</param>
         /// <seealso cref="https://docs.microsoft.com/en-us/aspnet/core/fundamentals/logging/?view=aspnetcore-2.1#windows-eventlog-provider"/>
-        public QnaBotBot(QnaBotAccessors accessors, ILoggerFactory loggerFactory)
+        public QnaBotBot(QnAMaker qnaMaker, ILoggerFactory loggerFactory)
         {
             if (loggerFactory == null)
             {
@@ -40,7 +47,8 @@ namespace QnaBot
 
             _logger = loggerFactory.CreateLogger<QnaBotBot>();
             _logger.LogTrace("Turn start.");
-            _accessors = accessors ?? throw new System.ArgumentNullException(nameof(accessors));
+            //_accessors = accessors ?? throw new System.ArgumentNullException(nameof(accessors));
+            _qnaMaker = qnaMaker;
         }
 
         /// <summary>
@@ -58,31 +66,56 @@ namespace QnaBot
         /// <seealso cref="IMiddleware"/>
         public async Task OnTurnAsync(ITurnContext turnContext, CancellationToken cancellationToken = default(CancellationToken))
         {
-            // Handle Message activity type, which is the main activity type for shown within a conversational interface
-            // Message activities may contain text, speech, interactive cards, and binary or unknown attachments.
-            // see https://aka.ms/about-bot-activity-message to learn more about the message and other activity types
             if (turnContext.Activity.Type == ActivityTypes.Message)
             {
-                // Get the conversation state from the turn context.
-                var state = await _accessors.CounterState.GetAsync(turnContext, () => new CounterState());
+                if (string.IsNullOrWhiteSpace(turnContext.Activity.Text))
+                {
+                    await turnContext.SendActivityAsync(MessageFactory.Text("Esto no funciona a menos que digas algo primero."), cancellationToken);
+                    return;
+                }
 
-                // Bump the turn count for this conversation.
-                state.TurnCount++;
+                var results = await _qnaMaker.GetAnswersAsync(turnContext).ConfigureAwait(false);
 
-                // Set the property using the accessor.
-                await _accessors.CounterState.SetAsync(turnContext, state);
+                if (results.Any())
+                {
+                    // Aqui va la respuesta que viene de QnA
+                    LogToApplicationInsights(results, turnContext.Activity.Text.ToString());
+                    var topResult = results.First();
+                    await turnContext.SendActivityAsync(MessageFactory.Text(topResult.Answer), cancellationToken);
 
-                // Save the new turn count into the conversation state.
-                await _accessors.ConversationState.SaveChangesAsync(turnContext);
+                }
+                else
+                {
+                    // Send to Application Insights
+                    await turnContext.SendActivityAsync(MessageFactory.Text("Lo siento, no te entiendo."), cancellationToken);
 
-                // Echo back to the user whatever they typed.
-                var responseMessage = $"Turn {state.TurnCount}: You sent '{turnContext.Activity.Text}'\n";
-                await turnContext.SendActivityAsync(responseMessage);
+                }
             }
             else
             {
-                await turnContext.SendActivityAsync($"{turnContext.Activity.Type} event detected");
+                await turnContext.SendActivityAsync($"{turnContext.Activity.Type} evento detectado");
             }
+        }
+
+        // QnA AppInsights
+        public void LogToApplicationInsights(QueryResult[] results, String texto)
+        {
+            // Create Application Insights object
+            TelemetryClient telemetry = new TelemetryClient();
+
+            // Set Application Insights Instrumentation Key from App Settings
+            telemetry.Context.InstrumentationKey = "71265168-782c-4938-83b5-b9ff817b2aba";
+            //ConfigurationManager.AppSettings["BotDevAppInsightsKey"];
+            var topResult = results.First();
+            // Collect information to send to Application Insights
+            Dictionary<string, string> logProperties = new Dictionary<string, string>();
+            logProperties.Add("QnA_query", texto);
+            logProperties.Add("QnA_ScoringQuery", topResult.Score.ToString());
+            logProperties.Add("QnA_Question", topResult.Questions[0].ToString());
+            logProperties.Add("QnA_Answer", topResult.Answer);
+
+            // Send to Application Insights
+            telemetry.TrackTrace("QnA", Microsoft.ApplicationInsights.DataContracts.SeverityLevel.Information, logProperties);
         }
     }
 }
